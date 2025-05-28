@@ -8,6 +8,8 @@ import {
   getDocs,
   orderBy,
   limit,
+  doc,
+  getDoc,
 } from "firebase/firestore";
 import { getAuth } from "firebase/auth";
 import { Link } from "react-router-dom";
@@ -31,75 +33,75 @@ const Dashboard = () => {
       if (!auth.currentUser) return;
 
       try {
-        // Obtener dispositivos del usuario
-        const userDevicesQuery = query(
-          collection(db, "devices"),
-          where("userId", "==", auth.currentUser.uid)
-        );
-
-        const devicesSnapshot = await getDocs(userDevicesQuery);
+        // Obtener información del usuario
+        const userDoc = await getDoc(doc(db, "users", auth.currentUser.uid));
         const devicesList = [];
         let blockedCount = 0;
+        let lastActivityTime = null;
 
-        // Procesar dispositivos
-        devicesSnapshot.forEach((doc) => {
-          const deviceData = { id: doc.id, ...doc.data() };
+        if (userDoc.exists()) {
+          const userData = userDoc.data();
+
+          // Crear un dispositivo para el usuario
+          const deviceData = {
+            id: "device-" + auth.currentUser.uid,
+            deviceName: "Mi dispositivo móvil",
+            brand: userData.deviceInfo?.brand || "Smartphone",
+            modelName: userData.deviceInfo?.modelName || "Android",
+            osName: userData.deviceInfo?.osName || "Android",
+            osVersion: userData.deviceInfo?.osVersion || "Última versión",
+            deviceBlocked: userData.deviceBlocked || false,
+            lastActivity: userData.lastActivity || new Date().toISOString(),
+            blockedAt: userData.blockedAt,
+            userId: auth.currentUser.uid,
+            userEmail: auth.currentUser.email,
+          };
+
           devicesList.push(deviceData);
 
           if (deviceData.deviceBlocked) {
             blockedCount++;
           }
-        });
+
+          lastActivityTime = userData.lastActivity || deviceData.lastActivity;
+        }
 
         setDevices(devicesList);
 
         // Obtener eventos de seguridad recientes
-        const eventsPromises = devicesList.map(async (device) => {
-          const eventsQuery = query(
-            collection(db, "devices", device.id, "securityEvents"),
-            orderBy("timestamp", "desc"),
-            limit(5)
-          );
+        const eventsQuery = query(
+          collection(db, "securityEvents"),
+          where("userId", "==", auth.currentUser.uid),
+          orderBy("timestamp", "desc"),
+          limit(5)
+        );
 
-          const eventsSnapshot = await getDocs(eventsQuery);
-          const events = [];
+        const eventsSnapshot = await getDocs(eventsQuery);
+        const eventsList = [];
+        let suspiciousCount = 0;
 
-          eventsSnapshot.forEach((doc) => {
-            events.push({
-              id: doc.id,
-              deviceId: device.id,
-              deviceName: device.deviceName || "Dispositivo sin nombre",
-              ...doc.data(),
-            });
-          });
+        eventsSnapshot.forEach((doc) => {
+          const eventData = { id: doc.id, ...doc.data() };
+          eventsList.push(eventData);
 
-          return events;
+          if (eventData.type === "suspicious_activity") {
+            suspiciousCount++;
+          }
         });
 
-        const allEvents = await Promise.all(eventsPromises);
-        const flattenedEvents = allEvents
-          .flat()
-          .sort((a, b) => b.timestamp - a.timestamp);
+        setSecurityEvents(eventsList);
 
-        setSecurityEvents(flattenedEvents.slice(0, 10));
-
-        // Calcular estadísticas
-        const suspiciousCount = flattenedEvents.filter(
-          (event) => event.type === "suspicious_activity"
-        ).length;
-
-        const lastActivityTimestamp =
-          flattenedEvents.length > 0 ? flattenedEvents[0].timestamp : null;
-
+        // Actualizar estadísticas
         setStats({
-          totalDevices: devicesList.length,
+          totalDevices: devicesList.length > 0 ? 1 : 0, // Forzar a 1 si hay al menos un dispositivo
           blockedDevices: blockedCount,
           suspiciousActivities: suspiciousCount,
-          lastActivity: lastActivityTimestamp,
+          lastActivity: lastActivityTime || new Date().toISOString(),
         });
+
+        setLoading(false);
       } catch (error) {
-        console.error("Error al cargar datos del dashboard:", error);
-      } finally {
+        console.error("Error al cargar datos del dispositivo:", error);
         setLoading(false);
       }
     };

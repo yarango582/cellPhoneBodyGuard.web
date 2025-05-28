@@ -10,11 +10,12 @@ import {
   orderBy,
   limit,
   getDocs,
-  updateDoc,
   addDoc,
-  serverTimestamp,
+  updateDoc,
+  where,
 } from "firebase/firestore";
 import { getAuth } from "firebase/auth";
+import RemoteControl from "../components/RemoteControl";
 
 const DeviceDetail = () => {
   const { deviceId } = useParams();
@@ -23,7 +24,7 @@ const DeviceDetail = () => {
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState("info");
+  const [activeTab, setActiveTab] = useState("control");
 
   const auth = getAuth();
   const db = getFirestore();
@@ -33,27 +34,48 @@ const DeviceDetail = () => {
       if (!auth.currentUser || !deviceId) return;
 
       try {
-        // Obtener datos del dispositivo
-        const deviceDoc = await getDoc(doc(db, "devices", deviceId));
-
-        if (!deviceDoc.exists()) {
+        // Verificar que el ID del dispositivo corresponde al formato esperado
+        if (
+          !deviceId.startsWith("device-") ||
+          deviceId.substring(7) !== auth.currentUser.uid
+        ) {
           navigate("/devices");
           return;
         }
 
-        const deviceData = { id: deviceDoc.id, ...deviceDoc.data() };
+        // Obtener datos del usuario
+        const userDoc = await getDoc(doc(db, "users", auth.currentUser.uid));
 
-        // Verificar que el dispositivo pertenece al usuario actual
-        if (deviceData.userId !== auth.currentUser.uid) {
+        if (!userDoc.exists()) {
           navigate("/devices");
           return;
         }
+
+        const userData = userDoc.data();
+
+        // Crear objeto de dispositivo con la información del usuario
+        const deviceData = {
+          id: deviceId,
+          deviceName: userData.deviceInfo?.name || "Mi dispositivo",
+          brand: userData.deviceInfo?.brand || "Desconocido",
+          modelName: userData.deviceInfo?.modelName || "Desconocido",
+          osName: userData.deviceInfo?.osName || "Android",
+          osVersion: userData.deviceInfo?.osVersion || "Desconocido",
+          deviceBlocked: userData.deviceBlocked || false,
+          lastActivity: userData.lastActivity || new Date().toISOString(),
+          blockedAt: userData.blockedAt,
+          userId: auth.currentUser.uid,
+          userEmail: auth.currentUser.email,
+          createdAt: userData.createdAt,
+          securitySettings: userData.securitySettings || {},
+        };
 
         setDevice(deviceData);
 
         // Obtener eventos de seguridad recientes
         const eventsQuery = query(
-          collection(db, "devices", deviceId, "securityEvents"),
+          collection(db, "securityEvents"),
+          where("userId", "==", auth.currentUser.uid),
           orderBy("timestamp", "desc"),
           limit(20)
         );
@@ -113,28 +135,23 @@ const DeviceDetail = () => {
     try {
       setActionLoading(true);
 
-      // Crear un nuevo comando en Firestore
-      await addDoc(collection(db, "devices", deviceId, "commands"), {
-        command,
-        timestamp: serverTimestamp(),
-        processed: false,
-        userId: auth.currentUser.uid,
-      });
-
-      // Registrar el evento
-      await addDoc(collection(db, "devices", deviceId, "securityEvents"), {
-        type: "remote_command",
-        description: `Comando remoto enviado: ${command}`,
-        timestamp: Date.now(),
-        details: { command },
-      });
-
-      // Si el comando es bloquear, actualizar el estado del dispositivo
+      // Si el comando es bloquear, actualizar el estado del usuario
       if (command === "lock") {
-        await updateDoc(doc(db, "devices", deviceId), {
+        // Actualizar el documento del usuario
+        await updateDoc(doc(db, "users", auth.currentUser.uid), {
           deviceBlocked: true,
           blockedAt: new Date().toISOString(),
           blockReason: "remote_lock",
+          lastActivity: new Date().toISOString(),
+        });
+
+        // Registrar el evento de bloqueo
+        await addDoc(collection(db, "securityEvents"), {
+          type: "device_blocked",
+          description: "Dispositivo bloqueado remotamente desde la web",
+          timestamp: Date.now(),
+          userId: auth.currentUser.uid,
+          details: { reason: "remote_lock" },
         });
 
         // Actualizar el estado local
@@ -144,13 +161,27 @@ const DeviceDetail = () => {
           blockedAt: new Date().toISOString(),
           blockReason: "remote_lock",
         });
+
+        alert(
+          "Dispositivo bloqueado exitosamente. El usuario necesitará su clave de seguridad para desbloquearlo."
+        );
       }
 
-      // Si el comando es desbloquear, actualizar el estado del dispositivo
+      // Si el comando es desbloquear, actualizar el estado del usuario
       if (command === "unlock") {
-        await updateDoc(doc(db, "devices", deviceId), {
+        // Actualizar el documento del usuario
+        await updateDoc(doc(db, "users", auth.currentUser.uid), {
           deviceBlocked: false,
           unblockedAt: new Date().toISOString(),
+          lastActivity: new Date().toISOString(),
+        });
+
+        // Registrar el evento de desbloqueo
+        await addDoc(collection(db, "securityEvents"), {
+          type: "device_unblocked",
+          description: "Dispositivo desbloqueado remotamente desde la web",
+          timestamp: Date.now(),
+          userId: auth.currentUser.uid,
         });
 
         // Actualizar el estado local
@@ -159,9 +190,9 @@ const DeviceDetail = () => {
           deviceBlocked: false,
           unblockedAt: new Date().toISOString(),
         });
-      }
 
-      alert(`Comando "${command}" enviado correctamente`);
+        alert("Dispositivo desbloqueado exitosamente.");
+      }
     } catch (error) {
       console.error("Error al enviar comando remoto:", error);
       alert("Error al enviar comando remoto");
@@ -230,10 +261,6 @@ const DeviceDetail = () => {
           <BackIcon />
           Volver a dispositivos
         </BackButton>
-
-        <DeviceStatus blocked={device.deviceBlocked}>
-          {device.deviceBlocked ? "Bloqueado" : "Activo"}
-        </DeviceStatus>
       </Header>
 
       <DeviceHeader>
@@ -251,6 +278,9 @@ const DeviceDetail = () => {
           <DeviceLastSeen>
             Última actividad: {formatDate(device.lastActivity)}
           </DeviceLastSeen>
+          <DeviceStatus blocked={device.deviceBlocked}>
+            {device.deviceBlocked ? "Bloqueado" : "Activo"}
+          </DeviceStatus>
         </DeviceHeaderInfo>
       </DeviceHeader>
 
@@ -267,8 +297,8 @@ const DeviceDetail = () => {
         ) : (
           <ActionButton
             color="#DC3545"
-            onClick={() => confirmAction("Bloquear", "lock")}
-            disabled={actionLoading}
+            onClick={() => confirmAction("¿Bloquear dispositivo?", "lock")}
+            disabled={device.deviceBlocked || actionLoading}
           >
             <LockIcon />
             Bloquear
@@ -277,24 +307,30 @@ const DeviceDetail = () => {
 
         <ActionButton
           color="#17A2B8"
-          onClick={() => confirmAction("Copia de seguridad", "backup")}
-          disabled={actionLoading}
+          onClick={() => alert("Esta función estará disponible próximamente")}
+          disabled={true}
         >
           <BackupIcon />
-          Copia de seguridad
+          Próximamente
         </ActionButton>
 
         <ActionButton
           color="#FFC107"
-          onClick={() => confirmAction("Localizar", "locate")}
-          disabled={actionLoading}
+          onClick={() => alert("Esta función estará disponible próximamente")}
+          disabled={true}
         >
           <LocationIcon />
-          Localizar
+          Próximamente
         </ActionButton>
       </ActionButtons>
 
       <TabsContainer>
+        <TabButton
+          active={activeTab === "control"}
+          onClick={() => setActiveTab("control")}
+        >
+          Control Remoto
+        </TabButton>
         <TabButton
           active={activeTab === "info"}
           onClick={() => setActiveTab("info")}
@@ -305,11 +341,13 @@ const DeviceDetail = () => {
           active={activeTab === "events"}
           onClick={() => setActiveTab("events")}
         >
-          Eventos de seguridad
+          Eventos
         </TabButton>
       </TabsContainer>
 
-      {activeTab === "info" ? (
+      {activeTab === "control" ? (
+        <RemoteControl deviceId={deviceId} />
+      ) : activeTab === "info" ? (
         <InfoPanel>
           <InfoSection>
             <SectionTitle>Información del dispositivo</SectionTitle>
@@ -473,6 +511,8 @@ const DeviceStatus = styled.div`
   font-weight: 600;
   background-color: ${(props) => (props.blocked ? "#DC3545" : "#28A745")}20;
   color: ${(props) => (props.blocked ? "#DC3545" : "#28A745")};
+  margin-top: 10px;
+  display: inline-block;
 `;
 
 const DeviceHeader = styled.div`
